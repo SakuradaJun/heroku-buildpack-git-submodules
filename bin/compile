@@ -109,8 +109,7 @@ YAML::load_file(File.join(BUILD_DIR, '.git_submodules.yml')).each_pair do |repo_
   Dir.chdir repo_path
   puts "Use #{SSH_DIR}/id_rsa:"
   indent "Fetching submodule #{repo}"
-  # cmd = "git clone --verbose --depth 1 --branch #{repo['branch']} #{repo['url']} #{repo_path}"
-  cmd = "git clone --verbose --depth 1 #{repo['url']} #{repo_path}"
+  cmd = "git clone --verbose --depth 1 --branch #{repo['branch']} #{repo['url']} #{repo_path}"
   arrow cmd
   system(cmd) or raise "Fail to clone repo"
 end
