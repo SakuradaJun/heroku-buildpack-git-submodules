@@ -1,0 +1,116 @@
+#!/usr/bin/env ruby
+require 'fileutils'
+require 'tmpdir'
+require 'pathname'
+require 'yaml'
+
+$stdout.sync = true
+
+BUILD_DIR = ARGV[0]
+CACHE_DIR = ARGV[1]
+ENV_DIR   = ARGV[2]
+SSH_DIR   = File.expand_path "#{ENV['HOME']}/.ssh"
+
+release = {
+    "addons" => [],
+    "config_vars" => {},
+    "default_process_types" => {}
+}
+
+def indent(str)
+    str.split("\n").each do |line|
+        puts "       #{line}"
+    end
+end
+
+def arrow(str)
+    str.split("\n").each do |line|
+        puts "-----> #{line}"
+    end
+end
+
+def error(str)
+    str.split("\n").each do |line|
+        puts " !     #{line}"
+    end
+end
+
+
+arrow "Found a .git_submodules.yml file"
+arrow "ssh dir is #{SSH_DIR}"
+Dir.chdir BUILD_DIR
+
+key_file_path = File.join ENV_DIR, 'SSH_KEY'
+ssh_key = File.open(key_file_path, &:read) if File.exist? key_file_path
+
+if ssh_key.nil?
+  alert "SSH_KEY not set"
+  alert "  Try `heroku config:add SSH_KEY=<your private token>`"
+  exit 1
+end
+
+###################### Process and clean up the ssh keys #######################
+fingerprint = nil
+temp_key = nil
+clean_host_hash = nil
+
+Dir.mktmpdir 'ssh_buidpack' do |dir|
+  # Process key to standardise it's format
+  `ssh-keygen -e -P '' -f #{key_file_path} < /dev/null > #{dir}/ssh_buildpack_key.pub.rfc 2>/dev/null`
+  `ssh-keygen -i -P '' -f #{dir}/ssh_buildpack_key.pub.rfc > #{dir}/ssh_buildpack_key.pub 2>/dev/null`
+
+  # # Process host hash to standardise it's format
+  # `ssh-keygen -e -P '' -f #{key_file_path} < /dev/null > #{dir}/host_hash.pub.rfc 2>/dev/null`
+  # `ssh-keygen -i -P '' -f #{dir}/host_hash.pub.rfc > #{dir}/host_hash.pub 2>/dev/null`
+
+  fingerprint = `ssh-keygen -l -f #{dir}/ssh_buildpack_key.pub | awk '{print $2}'`
+
+  # only used to be sure the passed key was valid
+  temp_key = `echo "#{fingerprint}" | tr -ds ':' '' | egrep -ie "[a-f0-9]{32}" 2>/dev/null`
+
+  # clean_host_hash = `cat "#{dir}/host_hash.pub"`
+
+  if temp_key.strip == ''
+    alert "SSH DEPLOY_KEY was invalid"
+    exit 1
+  else
+    arrow "Using SSH DEPLOY_KEY #{fingerprint}"
+  end
+
+end
+
+# Create the ssh directory on the server
+Dir.mkdir(SSH_DIR, 0700) unless File.exists?(SSH_DIR)
+
+# Create id_rsa file and write contents
+File.open "#{SSH_DIR}/id_rsa", 'w' do |f|
+  f.write ssh_key
+end
+FileUtils.chmod 0600, "#{SSH_DIR}/id_rsa"
+arrow "Wrote ssh key to user's ssh dir"
+
+File.open "#{SSH_DIR}/config", 'w' do |f|
+  f.puts "IdentityFile #{SSH_DIR}/id_rsa"
+  f.puts "host github.com"
+  f.puts "     user git"
+  f.puts "     IdentityFile #{SSH_DIR}/id_rsa"
+end
+FileUtils.chmod 0600, "#{SSH_DIR}/config"
+arrow "Wrote config to user's config"
+
+system "ssh-keyscan -t rsa github.com > #{SSH_DIR}/known_hosts"
+
+YAML::load_file(File.join(BUILD_DIR, '.git_submodules.yml')).each_pair do |repo_subdir, repo|
+  repo_path = File.join(BUILD_DIR, repo_subdir)
+  unless Dir.exist? repo_path
+    indent "mkdir #{repo_path}"
+    Dir.mkdir(repo_path, 0700)
+  end
+  Dir.chdir repo_path
+  puts "Use #{SSH_DIR}/id_rsa:"
+  indent "Fetching submodule #{repo}"
+  # cmd = "git clone --verbose --depth 1 --branch #{repo['branch']} #{repo['url']} #{repo_path}"
+  cmd = "git clone --verbose --depth 1 #{repo['url']} #{repo_path}"
+  arrow cmd
+  system(cmd) or raise "Fail to clone repo"
+end
